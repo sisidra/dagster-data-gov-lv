@@ -1,0 +1,3 @@
+code_servers:
+  local_startup_timeout: 1200
+  reload_timeout: 1200

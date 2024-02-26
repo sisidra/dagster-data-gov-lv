@@ -1,0 +1,10 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[tool.dagster]
+working_directory = "src"
+module_name = "data_gov_lv"
+
+[tool.isort]
+profile = "black"
