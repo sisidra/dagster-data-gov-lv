@@ -1,13 +1,11 @@
-import hashlib
 import json
-import os
 import re
 from itertools import groupby
 from pathlib import Path
 from typing import Any, List, Sequence, Optional, Tuple, Iterator, Dict, cast
 from xml.dom.minidom import Document
 
-import requests
+import progressbar as pb
 from ckanapi import RemoteCKAN
 from dagster import (
     AssetExecutionContext,
@@ -27,11 +25,12 @@ from dagster._serdes import unpack_value, pack_value
 from duckdb import DuckDBPyRelation
 from duckdb.typing import DuckDBPyType
 from filelock import FileLock
+from requests import HTTPError
 from unidecode import unidecode
 
 from data_gov_lv.duckdb.url_loader import duckdb_load_from_csv_url, duckdb_load_from_json_url
 from data_gov_lv.url_cache.cache_paths import dagster_cache_root, cache_path
-import progressbar as pb
+from data_gov_lv.url_cache.fetcher import cached_get
 
 dagster_home = DagsterInstance.get().root_directory
 cache_dir = dagster_cache_root(DagsterInstance.get())
@@ -62,12 +61,15 @@ class CKANCacheableAssetsDefinition(CacheableAssetsDefinition):
             print("TODO: conforms to: " + conforms_to)
             return None, None
 
-        csvw_response = requests.get(conforms_to)
-        if csvw_response.status_code == 404:
-            return None, None
+        try:
+            csvw_path = cached_get(cache_dir, conforms_to)
+        except HTTPError as e:
+            if e.response.status_code == 404:
+                return None, None
+            raise e
+        with csvw_path.open("r") as fp:
+            csvw = json.load(fp)
 
-        csvw_response.encoding = csvw_response.apparent_encoding
-        csvw = csvw_response.json()
         description = csvw.get("dc:title")
         schema = MetadataValue.table_schema(
             TableSchema(
@@ -180,13 +182,15 @@ class CKANCacheableAssetsDefinition(CacheableAssetsDefinition):
             get_dagster_logger().info("TODO: Support https://odata.ievp.gov.lv/ReportOdata/")
             return
 
-        namespace = _dagster_identifier(package["name"])
         resource_format = _dagster_identifier(resource["format"])
+        if resource_format == "":
+            resource_format = "unspecified"
+        namespace = _dagster_identifier(package["name"])
         name = _dagster_identifier(resource.get("name") or resource["id"])
 
         schema_description, schema_definition = self._detect_schema(resource)
 
-        asset_key = AssetKey([namespace, resource_format, name])
+        asset_key = AssetKey([resource_format, namespace, name])
 
         yield AssetsDefinitionCacheableData(
             keys_by_output_name={DEFAULT_OUTPUT: asset_key},
@@ -281,7 +285,7 @@ class CKANCacheableAssetsDefinition(CacheableAssetsDefinition):
             timer.update(i)
 
             metadata = def_data.metadata_by_output_name[DEFAULT_OUTPUT]
-            url = cast(metadata["url"], UrlMetadataValue).url
+            url = cast(UrlMetadataValue, metadata["url"]).url
 
             io_manager_key = None
             output_type = Any
@@ -311,8 +315,6 @@ class CKANCacheableAssetsDefinition(CacheableAssetsDefinition):
                     description=def_data.extra_metadata.get("schema_description"),
                     metadata={
                         "schema": def_data.extra_metadata.get("schema_definition"),
-                        "schema1": def_data.extra_metadata.get("schema_definition"),
-                        "schema2": def_data.extra_metadata.get("schema_definition"),
                     },
                 )
 
@@ -324,7 +326,7 @@ class CKANCacheableAssetsDefinition(CacheableAssetsDefinition):
                 },
                 io_manager_key=io_manager_key,
                 description=def_data.extra_metadata["description"],
-                group_name="data_gov_lv",
+                group_name=_dagster_identifier(metadata["package/name"]),
                 dagster_type=dagster_type,
             )
             def gov_asset(context: AssetExecutionContext) -> output_type:
